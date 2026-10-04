@@ -75,8 +75,8 @@ where
 
     // Return a number of active subscribers to this shared sender.
     #[cfg(feature = "unstable-runtime-subscribe")]
-    pub(crate) fn subscribers(&self) -> usize {
-        self.dispatch_tx.receiver_count()
+    pub(crate) fn subscribers(&self) -> Option<usize> {
+        Some(self.dispatch_tx.receiver_count()).filter(|c| *c > 0)
     }
 }
 
@@ -141,18 +141,17 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
         match ready!(this.rx.as_mut().poll_next(cx)) {
-            #[cfg(feature = "unstable-runtime-subscribe")]
-            Some(obj_ref) => if obj_ref.extra.remaining_lookups.is_some() {
-                this.reader.remove(&obj_ref)
-            } else {
-                this.reader.get(&obj_ref)
+            Some(obj_ref) => {
+                #[cfg(feature = "unstable-runtime-subscribe")]
+                let obj = if obj_ref.extra.remaining_lookups.is_some() {
+                    this.reader.remove(&obj_ref)
+                } else {
+                    this.reader.get(&obj_ref)
+                };
+                #[cfg(not(feature = "unstable-runtime-subscribe"))]
+                let obj = this.reader.get(&obj_ref);
+                obj.map_or(Poll::Pending, |obj| Poll::Ready(Some(obj)))
             }
-            .map_or(Poll::Pending, |obj| Poll::Ready(Some(obj))),
-            #[cfg(not(feature = "unstable-runtime-subscribe"))]
-            Some(obj_ref) => this
-                .reader
-                .get(&obj_ref)
-                .map_or(Poll::Pending, |obj| Poll::Ready(Some(obj))),
             None => Poll::Ready(None),
         }
     }

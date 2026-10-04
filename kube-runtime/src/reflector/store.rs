@@ -112,33 +112,31 @@ where
                 let mut store = self.store.write();
                 #[cfg(feature = "unstable-runtime-subscribe")]
                 if self.dispatcher.is_some()
-                    && store.entry(key.clone()).key().extra.remaining_lookups.is_some()
+                    && let Some((stored, _)) = store.get_key_value(&key)
+                    && stored.extra.remaining_lookups.is_some()
                 {
                     store.remove(&key);
                 }
                 store.insert(key, obj);
             }
             watcher::Event::Delete(obj) => {
-                if cfg!(not(feature = "unstable-runtime-subscribe")) {
-                    let key = obj.to_object_ref(self.dyntype.clone());
-                    self.store.write().remove(&key);
-                } else {
-                    #[cfg(feature = "unstable-runtime-subscribe")]
-                    let mut key = obj.to_object_ref(self.dyntype.clone());
-                    #[cfg(feature = "unstable-runtime-subscribe")]
-                    let mut store = self.store.write();
+                let key = obj.to_object_ref(self.dyntype.clone());
+                let mut store = self.store.write();
+                #[cfg(not(feature = "unstable-runtime-subscribe"))]
+                store.remove(&key);
 
-                    #[cfg(feature = "unstable-runtime-subscribe")]
-                    if let Some((original_key, existing)) = store.remove_entry(&key) {
-                        if self.dispatcher.is_none() {
-                        } else if existing.uid().as_deref() == key.extra.uid.as_deref() {
-                            // Re-insert the entry with updated key, as insert on its own doesnt modify the key
-                            key.extra.remaining_lookups =
-                                self.dispatcher.as_ref().map(Dispatcher::subscribers);
-                            store.insert(key, existing);
-                        } else {
-                            store.insert(original_key, existing);
-                        }
+                #[cfg(feature = "unstable-runtime-subscribe")]
+                if let Some((original_key, existing)) = store.remove_entry(&key)
+                    && let Some(dispatcher) = &self.dispatcher
+                    && let Some(subscribers) = dispatcher.subscribers()
+                {
+                    if existing.uid().as_deref() == key.extra.uid.as_deref() {
+                        // Re-insert the entry with updated key, as insert on its own doesnt modify the key
+                        let mut key = key;
+                        key.extra.remaining_lookups = Some(subscribers);
+                        store.insert(key, existing);
+                    } else {
+                        store.insert(original_key, existing);
                     }
                 }
             }
@@ -193,8 +191,14 @@ where
 
                 #[cfg(feature = "unstable-runtime-subscribe")]
                 watcher::Event::Delete(obj) => {
-                    let mut obj_ref = obj.to_object_ref(self.dyntype.clone());
-                    obj_ref.extra.remaining_lookups = Some(dispatcher.subscribers());
+                    let obj_ref = {
+                        let obj_ref = obj.to_object_ref(self.dyntype.clone());
+                        let store = self.store.read();
+                        store
+                            .get_key_value(&obj_ref)
+                            .map(|(obj_ref, _)| obj_ref.clone())
+                            .unwrap_or(obj_ref)
+                    };
                     dispatcher.broadcast(obj_ref).await;
                 }
 
