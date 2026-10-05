@@ -7,6 +7,7 @@ use std::{fmt::Debug, sync::Arc};
 use educe::Educe;
 use futures::Stream;
 use pin_project::pin_project;
+#[cfg(feature = "unstable-runtime-subscribe")] use pin_project::pinned_drop;
 use std::task::ready;
 
 use crate::reflector::{ObjectRef, Store};
@@ -94,7 +95,8 @@ where
 /// can still be polled after the root stream has been dropped.
 ///
 /// [`Writer`]: crate::reflector::Writer
-#[pin_project]
+#[cfg_attr(feature = "unstable-runtime-subscribe", pin_project(PinnedDrop))]
+#[cfg_attr(not(feature = "unstable-runtime-subscribe"), pin_project)]
 pub struct ReflectHandle<K>
 where
     K: Lookup + Clone + 'static,
@@ -154,6 +156,18 @@ where
             }
             None => Poll::Ready(None),
         }
+    }
+}
+
+#[cfg(feature = "unstable-runtime-subscribe")]
+#[pinned_drop]
+impl<K> PinnedDrop for ReflectHandle<K>
+where
+    K: Lookup + Clone,
+    K::DynamicType: Eq + std::hash::Hash + Clone,
+{
+    fn drop(self: Pin<&mut Self>) {
+        self.reader().drop_subscriber();
     }
 }
 
@@ -255,7 +269,7 @@ pub(crate) mod test {
 
         let (reader, writer) = reflector::store_shared(10);
         let mut subscriber = pin!(writer.subscribe().unwrap());
-        let mut other_subscriber = pin!(writer.subscribe().unwrap());
+        let mut other_subscriber = Box::pin(writer.subscribe().unwrap());
         let mut delayed_subscriber = pin!(writer.subscribe().unwrap());
         let mut reflect = pin!(st.reflect_shared(writer));
 
@@ -295,7 +309,7 @@ pub(crate) mod test {
         assert_eq!(reader.get(&ObjectRef::from_obj(&foo)), Some(foo.clone()));
         assert_eq!(poll!(subscriber.next()), Poll::Ready(Some(foo.clone())));
         assert_eq!(reader.get(&ObjectRef::from_obj(&foo)), Some(foo.clone()));
-        assert_eq!(poll!(other_subscriber.next()), Poll::Ready(Some(foo.clone())));
+        drop(other_subscriber);
         assert_eq!(reader.get(&ObjectRef::from_obj(&foo)), Some(foo.clone()));
 
         // The delayed subscriber consumes all queued events from cache with latest state of foo

@@ -286,7 +286,13 @@ where
     #[cfg(feature = "unstable-runtime-subscribe")]
     #[must_use]
     pub(crate) fn remove(&self, key: &ObjectRef<K>) -> Option<Arc<K>> {
-        let mut store = self.store.write();
+        Self::remove_from_store(&mut self.store.write(), key)
+    }
+
+    /// Perform atomic removal from store based on decrement of remaining lookups
+    #[cfg(feature = "unstable-runtime-subscribe")]
+    #[must_use]
+    fn remove_from_store(store: &mut AHashMap<ObjectRef<K>, Arc<K>>, key: &ObjectRef<K>) -> Option<Arc<K>> {
         store.remove_entry(key).map(|(mut stored_key, obj)| {
             if key.extra.uid.as_deref() != obj.uid().as_deref() {
                 store.insert(stored_key, obj.clone());
@@ -305,6 +311,26 @@ where
 
             obj
         })
+    }
+
+    /// Perform cleanup of retained cache items in the middle of deletion.
+    ///
+    /// This does not guarantee deletion event delivery to all pending subscribers,
+    /// but avoids leaving unconsumed deleted objects in cache, and is consistent
+    /// with handling of apply events always reading latest cache state, potentially
+    /// missing individual edges.
+    #[cfg(feature = "unstable-runtime-subscribe")]
+    pub(crate) fn drop_subscriber(&self) {
+        let mut store = self.store.write();
+        let keys: Vec<ObjectRef<K>> = store
+            .keys()
+            .filter(|k| k.extra.remaining_lookups.is_some())
+            .cloned()
+            .collect();
+
+        for k in keys {
+            let _ = Self::remove_from_store(&mut store, &k);
+        }
     }
 
     /// Return a full snapshot of the current values
